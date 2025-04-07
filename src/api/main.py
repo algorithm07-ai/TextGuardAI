@@ -1,16 +1,28 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional
+import uvicorn
+import logging
 import os
+from datetime import datetime
+import uuid
+from typing import List, Optional
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Initialize FastAPI app
 app = FastAPI(
-    title="TextGuard AI API",
-    description="API for text classification and spam detection",
+    title="TextGuard AI",
+    description="AI-powered text classification and spam detection API",
     version="1.0.0"
 )
 
@@ -36,12 +48,28 @@ async def root():
     return {
         "name": "TextGuard AI",
         "version": "1.0.0",
-        "description": "Text classification and spam detection API"
+        "description": "AI-powered text classification and spam detection API",
+        "status": "operational"
     }
 
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
+
+@app.get("/tools")
+async def get_tools():
+    return {
+        "tools": [
+            {
+                "name": "text_classifier",
+                "description": "Classifies text as spam or not spam",
+                "parameters": {
+                    "text": "string",
+                    "analysis_type": "string (optional)"
+                }
+            }
+        ]
+    }
 
 @app.post("/classify")
 async def classify_text(request: TextRequest):
@@ -51,9 +79,12 @@ async def classify_text(request: TextRequest):
             "text": request.text,
             "is_spam": False,  # Placeholder
             "confidence": 0.95,  # Placeholder
-            "analysis_type": request.analysis_type
+            "analysis_type": request.analysis_type,
+            "timestamp": datetime.utcnow().isoformat(),
+            "request_id": str(uuid.uuid4())
         }
     except Exception as e:
+        logger.error(f"Error processing request: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/batch_classify")
@@ -65,12 +96,14 @@ async def batch_classify(request: BatchTextRequest):
                 "text": text,
                 "is_spam": False,  # Placeholder
                 "confidence": 0.95,  # Placeholder
-                "analysis_type": request.analysis_type
+                "analysis_type": request.analysis_type,
+                "timestamp": datetime.utcnow().isoformat(),
+                "request_id": str(uuid.uuid4())
             })
         return {"results": results}
     except Exception as e:
+        logger.error(f"Error processing batch request: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000) 
