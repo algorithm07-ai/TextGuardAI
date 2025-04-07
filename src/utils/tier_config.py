@@ -1,6 +1,6 @@
 import os
 import time
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 from fastapi import HTTPException, Depends
 from fastapi.security import APIKeyHeader
 from dotenv import load_dotenv
@@ -104,4 +104,30 @@ class TierConfig:
             "requests_today": current_count,
             "requests_remaining": self.tier_limits[tier]["requests_per_day"] - current_count,
             "reset_time": self.request_counts[tier]["reset_time"]
-        } 
+        }
+
+def get_tier_config() -> Dict[str, Dict[str, Any]]:
+    """
+    Get the configuration for different API tiers.
+    
+    Returns:
+        Dict containing tier configurations
+    """
+    return {
+        "free": {
+            "max_tokens": 1000,
+            "temperature": 0.7,
+            "features": ["basic_analysis"]
+        },
+        "basic": {
+            "max_tokens": 2000,
+            "temperature": 0.5,
+            "features": ["basic_analysis", "sentiment_analysis", "entity_extraction"]
+        },
+        "premium": {
+            "max_tokens": 4000,
+            "temperature": 0.3,
+            "features": ["basic_analysis", "sentiment_analysis", "entity_extraction", 
+                        "language_detection", "content_moderation", "custom_models"]
+        }
+    } 

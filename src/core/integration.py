@@ -1,103 +1,141 @@
 import os
-import aiohttp
-import logging
-from typing import List, Dict, Any
 import json
-from dotenv import load_dotenv
+import logging
+import aiohttp
+import asyncio
+from typing import Dict, List, Optional, Any
+from datetime import datetime
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-class DeepSeekIntegration:
-    def __init__(self):
-        load_dotenv()
-        self.api_key = os.getenv("DEEPSEEK_API_KEY")
-        self.api_url = "https://api.deepseek.com/v1/chat/completions"
-        self.headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
+class DeepSeekMCPClient:
+    """
+    Client for interacting with the DeepSeek API using the MCP protocol.
+    """
+    
+    def __init__(self, api_key: str, tier: str = "free"):
+        """
+        Initialize the DeepSeek MCP client.
+        
+        Args:
+            api_key: The DeepSeek API key
+            tier: The API access tier (free, basic, premium)
+        """
+        self.api_key = api_key
+        self.tier = tier
+        self.base_url = "https://api.deepseek.com/v1"
+        self.session = None
+        self.cache = {}
+        self.cache_ttl = 3600  # 1 hour
+        
+    async def __aenter__(self):
+        """Create aiohttp session when entering context."""
+        self.session = aiohttp.ClientSession(
+            headers={"Authorization": f"Bearer {self.api_key}"}
+        )
+        return self
+        
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Close aiohttp session when exiting context."""
+        if self.session:
+            await self.session.close()
+            
+    def set_tier(self, tier: str):
+        """
+        Set the API access tier.
+        
+        Args:
+            tier: The API access tier (free, basic, premium)
+        """
+        if tier not in ["free", "basic", "premium"]:
+            raise ValueError("Tier must be one of: free, basic, premium")
+        self.tier = tier
+        logger.info(f"API tier set to: {tier}")
+        
+    async def process_text(self, text: str, options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Process text using the DeepSeek API.
+        
+        Args:
+            text: The text to process
+            options: Additional options for processing
+            
+        Returns:
+            Dict containing the processing results
+        """
+        if not self.session:
+            self.session = aiohttp.ClientSession(
+                headers={"Authorization": f"Bearer {self.api_key}"}
+            )
+            
+        # Check cache
+        cache_key = f"{text}:{json.dumps(options or {})}"
+        if cache_key in self.cache:
+            cache_entry = self.cache[cache_key]
+            if (datetime.now() - cache_entry["timestamp"]).total_seconds() < self.cache_ttl:
+                logger.info("Using cached result")
+                return cache_entry["result"]
+                
+        # Prepare request
+        url = f"{self.base_url}/chat/completions"
+        payload = {
+            "model": "deepseek-chat",
+            "messages": [{"role": "user", "content": text}],
+            "tier": self.tier
         }
         
-    async def analyze_with_deepseek(self, text: str) -> Dict[str, Any]:
-        """
-        Analyze a single text using DeepSeek API.
-        """
+        if options:
+            payload.update(options)
+            
+        # Make request
         try:
-            async with aiohttp.ClientSession() as session:
-                payload = {
-                    "model": "deepseek-chat",
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": "You are a spam detection expert. Analyze the given text and determine if it's spam or not. Provide a confidence score and explanation."
-                        },
-                        {
-                            "role": "user",
-                            "content": f"Analyze this text for spam: {text}"
-                        }
-                    ],
-                    "temperature": 0.3
+            async with self.session.post(url, json=payload) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    logger.error(f"API error: {error_text}")
+                    raise Exception(f"API error: {response.status} - {error_text}")
+                    
+                result = await response.json()
+                
+                # Cache result
+                self.cache[cache_key] = {
+                    "result": result,
+                    "timestamp": datetime.now()
                 }
                 
-                async with session.post(self.api_url, headers=self.headers, json=payload) as response:
-                    if response.status != 200:
-                        error_text = await response.text()
-                        logger.error(f"DeepSeek API error: {error_text}")
-                        raise Exception(f"DeepSeek API error: {response.status}")
-                        
-                    result = await response.json()
-                    analysis = result['choices'][0]['message']['content']
-                    
-                    # Parse the analysis to extract key information
-                    is_spam = "spam" in analysis.lower()
-                    confidence = self._extract_confidence(analysis)
-                    
-                    return {
-                        "text": text,
-                        "is_spam": is_spam,
-                        "confidence": confidence,
-                        "analysis": analysis
-                    }
-                    
+                return result
         except Exception as e:
-            logger.error(f"Error in DeepSeek analysis: {str(e)}")
+            logger.error(f"Error processing text: {str(e)}")
             raise
             
-    async def batch_analyze(self, texts: List[str]) -> List[Dict[str, Any]]:
+    async def batch_process(self, texts: List[str], options: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """
-        Analyze multiple texts in parallel using DeepSeek API.
-        """
-        try:
-            tasks = [self.analyze_with_deepseek(text) for text in texts]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+        Process multiple texts in parallel.
+        
+        Args:
+            texts: List of texts to process
+            options: Additional options for processing
             
-            # Filter out any errors and log them
-            valid_results = []
-            for i, result in enumerate(results):
-                if isinstance(result, Exception):
-                    logger.error(f"Error processing text {i}: {str(result)}")
-                else:
-                    valid_results.append(result)
-                    
-            return valid_results
-            
-        except Exception as e:
-            logger.error(f"Error in batch analysis: {str(e)}")
-            raise
-            
-    def _extract_confidence(self, analysis: str) -> float:
+        Returns:
+            List of processing results
         """
-        Extract confidence score from the analysis text.
+        tasks = [self.process_text(text, options) for text in texts]
+        return await asyncio.gather(*tasks, return_exceptions=True)
+        
+    def get_usage_stats(self) -> Dict[str, Any]:
         """
-        try:
-            # Look for percentage or decimal in the text
-            import re
-            confidence_match = re.search(r'(\d+(?:\.\d+)?%?)\s*(?:confidence|probability|likelihood)', analysis.lower())
-            if confidence_match:
-                confidence_str = confidence_match.group(1)
-                # Convert percentage to decimal if needed
-                if '%' in confidence_str:
-                    return float(confidence_str.strip('%')) / 100
-                return float(confidence_str)
-            return 0.5  # Default confidence if not found
-        except:
-            return 0.5  # Default confidence if extraction fails 
+        Get API usage statistics.
+        
+        Returns:
+            Dict containing usage statistics
+        """
+        return {
+            "tier": self.tier,
+            "cache_size": len(self.cache),
+            "timestamp": datetime.now().isoformat()
+        } 

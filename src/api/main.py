@@ -1,32 +1,15 @@
-from fastapi import FastAPI, HTTPException, Depends, Request
+import os
+from typing import Dict, Any, Optional
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import uvicorn
-import logging
-import os
-import sys
-from datetime import datetime
-import uuid
-from typing import List, Optional
-from dotenv import load_dotenv
-
-# Add the project root directory to the Python path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
-
-# Load environment variables
-load_dotenv()
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+from src.core import DeepSeekMCPClient
+from src.utils import get_tier_config
 
 # Initialize FastAPI app
 app = FastAPI(
-    title="TextGuard AI",
-    description="AI-powered text classification and spam detection API",
+    title="TextGuard AI API",
+    description="API for text analysis and spam detection using DeepSeek MCP",
     version="1.0.0"
 )
 
@@ -39,75 +22,81 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Initialize MCP client
+client = DeepSeekMCPClient(
+    api_key=os.getenv("DEEPSEEK_API_KEY", "your-api-key-here")
+)
+
 class TextRequest(BaseModel):
     text: str
-    analysis_type: Optional[str] = "spam"
+    tier: Optional[str] = "free"
+    options: Optional[Dict[str, Any]] = None
 
-class BatchTextRequest(BaseModel):
-    texts: List[str]
-    analysis_type: Optional[str] = "spam"
+class BatchRequest(BaseModel):
+    texts: list[str]
+    tier: Optional[str] = "free"
+    options: Optional[Dict[str, Any]] = None
 
 @app.get("/")
 async def root():
+    """Root endpoint returning API information."""
     return {
-        "name": "TextGuard AI",
+        "name": "TextGuard AI API",
         "version": "1.0.0",
-        "description": "AI-powered text classification and spam detection API",
         "status": "operational"
     }
 
 @app.get("/health")
 async def health_check():
+    """Health check endpoint."""
     return {"status": "healthy"}
 
-@app.get("/tools")
-async def get_tools():
-    return {
-        "tools": [
-            {
-                "name": "text_classifier",
-                "description": "Classifies text as spam or not spam",
-                "parameters": {
-                    "text": "string",
-                    "analysis_type": "string (optional)"
-                }
-            }
-        ]
-    }
+@app.get("/tiers")
+async def get_tiers():
+    """Get available API tiers and their configurations."""
+    return get_tier_config()
 
-@app.post("/classify")
-async def classify_text(request: TextRequest):
+@app.post("/analyze")
+async def analyze_text(request: TextRequest):
+    """
+    Analyze a single text using the specified tier.
+    """
     try:
-        # Here you would implement the actual text classification logic
+        # Set tier
+        client.set_tier(request.tier)
+        
+        # Process text
+        result = await client.process_text(request.text, request.options)
+        
         return {
-            "text": request.text,
-            "is_spam": False,  # Placeholder
-            "confidence": 0.95,  # Placeholder
-            "analysis_type": request.analysis_type,
-            "timestamp": datetime.utcnow().isoformat(),
-            "request_id": str(uuid.uuid4())
+            "status": "success",
+            "result": result
         }
     except Exception as e:
-        logger.error(f"Error processing request: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/batch_classify")
-async def batch_classify(request: BatchTextRequest):
+@app.post("/batch")
+async def batch_analyze(request: BatchRequest):
+    """
+    Analyze multiple texts in parallel using the specified tier.
+    """
     try:
-        results = []
-        for text in request.texts:
-            results.append({
-                "text": text,
-                "is_spam": False,  # Placeholder
-                "confidence": 0.95,  # Placeholder
-                "analysis_type": request.analysis_type,
-                "timestamp": datetime.utcnow().isoformat(),
-                "request_id": str(uuid.uuid4())
-            })
-        return {"results": results}
+        # Set tier
+        client.set_tier(request.tier)
+        
+        # Process texts
+        results = await client.batch_process(request.texts, request.options)
+        
+        return {
+            "status": "success",
+            "results": results
+        }
     except Exception as e:
-        logger.error(f"Error processing batch request: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000) 
+@app.get("/stats")
+async def get_stats():
+    """
+    Get API usage statistics.
+    """
+    return client.get_usage_stats() 
