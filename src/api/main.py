@@ -4,10 +4,14 @@ from pydantic import BaseModel
 import uvicorn
 import logging
 import os
+import sys
 from datetime import datetime
 import uuid
 from typing import List, Optional
 from dotenv import load_dotenv
+
+# Add the project root directory to the Python path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 # Load environment variables
 load_dotenv()
