@@ -31,10 +31,22 @@ ENV/
 *.swp
 *.swo
 
+<<<<<<< HEAD
+=======
+# Logs
+*.log
+logs/
+
+# Cache
+.cache/
+.pytest_cache/
+
+>>>>>>> 8b234d3481701a4b75edd26cf36ac8672267fd0a
 # Environment variables
 .env
 .env.local
 
+<<<<<<< HEAD
 # Logs
 *.log
 
@@ -46,3 +58,16 @@ htmlcov/
 dist/
 build/
 *.egg-info/ 
+=======
+# Distribution
+dist/
+build/
+
+# Documentation
+docs/_build/
+site/
+
+# Test coverage
+.coverage
+htmlcov/ 
+>>>>>>> 8b234d3481701a4b75edd26cf36ac8672267fd0a
