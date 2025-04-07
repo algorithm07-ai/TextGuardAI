@@ -1,9 +1,20 @@
-import torch
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import uvicorn
 import logging
-from data_processor import DataProcessor
-from train import SimpleClassifier
+import os
+from datetime import datetime
+import uuid
+from typing import List, Optional
+from dotenv import load_dotenv
+
+from src.core.data_processor import DataProcessor
+from src.core.integration import DeepSeekIntegration
+from src.utils.tier_config import TierConfig
+
+# Load environment variables
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(
@@ -14,77 +25,105 @@ logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
 app = FastAPI(
-    title="SMS Spam Classifier API",
-    description="An API for classifying SMS messages as spam or ham",
+    title="TextGuard AI",
+    description="AI-powered text classification and spam detection API",
     version="1.0.0"
 )
 
-# Initialize model and processor
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model = None
-processor = None
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-class Message(BaseModel):
+# Initialize components
+tier_config = TierConfig()
+data_processor = DataProcessor()
+deepseek_integration = DeepSeekIntegration()
+
+class TextRequest(BaseModel):
     text: str
+    analysis_type: Optional[str] = "spam"
 
-class ClassificationResponse(BaseModel):
-    text: str
-    is_spam: bool
-    confidence: float
-    preprocessed_text: str
+class BatchTextRequest(BaseModel):
+    texts: List[str]
+    analysis_type: Optional[str] = "spam"
 
-@app.on_event("startup")
-async def load_model():
-    global model, processor
-    try:
-        logger.info("Loading model and processor...")
-        model = SimpleClassifier().to(device)
-        model.load_state_dict(torch.load('best_model.pt'))
-        model.eval()
-        
-        processor = DataProcessor()
-        # Load a small sample to fit the vectorizer
-        df = processor.load_data('SMSSpamCollection')
-        processor.prepare_data(df)
-        
-        logger.info("Model and processor loaded successfully")
-    except Exception as e:
-        logger.error(f"Error loading model: {str(e)}")
-        raise HTTPException(status_code=500, detail="Could not load model")
+@app.get("/")
+async def root():
+    return {
+        "name": "TextGuard AI",
+        "version": "1.0.0",
+        "description": "AI-powered text classification and spam detection API",
+        "status": "operational"
+    }
 
 @app.get("/health")
 async def health_check():
-    if model is None or processor is None:
-        raise HTTPException(status_code=503, detail="Service not ready")
     return {"status": "healthy"}
 
-@app.post("/classify", response_model=ClassificationResponse)
-async def classify_message(message: Message):
+@app.get("/tools")
+async def get_tools():
+    return {
+        "tools": [
+            {
+                "name": "text_classifier",
+                "description": "Classifies text as spam or not spam",
+                "parameters": {
+                    "text": "string",
+                    "analysis_type": "string (optional)"
+                }
+            }
+        ]
+    }
+
+@app.post("/classify")
+async def classify_text(request: TextRequest, api_key: str = Depends(tier_config.verify_api_key)):
     try:
-        # Preprocess the text
-        preprocessed_text = processor.preprocess_text(message.text)
+        # Check rate limit
+        if not tier_config.check_rate_limit(api_key):
+            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+
+        # Process text
+        result = await deepseek_integration.analyze_with_deepseek(request.text)
         
-        # Convert to features
-        features = processor.vectorizer.transform([preprocessed_text]).toarray()[0]
-        features = torch.FloatTensor(features).unsqueeze(0).to(device)
+        # Release request count
+        tier_config.release_request(api_key)
         
-        # Get prediction
-        with torch.no_grad():
-            outputs = model(features)
-            probabilities = torch.softmax(outputs, dim=1)
-            prediction = torch.argmax(outputs, dim=1)
-            confidence = probabilities[0][prediction[0]].item()
-        
-        return ClassificationResponse(
-            text=message.text,
-            is_spam=bool(prediction[0].item()),
-            confidence=confidence,
-            preprocessed_text=preprocessed_text
-        )
+        return result
     except Exception as e:
-        logger.error(f"Error during classification: {str(e)}")
-        raise HTTPException(status_code=500, detail="Classification error")
+        logger.error(f"Error processing request: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/batch_classify")
+async def batch_classify(request: BatchTextRequest, api_key: str = Depends(tier_config.verify_api_key)):
+    try:
+        # Check rate limit
+        if not tier_config.check_rate_limit(api_key):
+            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+
+        # Process texts
+        results = await deepseek_integration.batch_analyze(request.texts)
+        
+        # Release request count
+        tier_config.release_request(api_key)
+        
+        return results
+    except Exception as e:
+        logger.error(f"Error processing batch request: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/usage")
+async def get_usage(api_key: str = Depends(tier_config.verify_api_key)):
+    try:
+        usage = tier_config.get_usage_stats(api_key)
+        return usage
+    except Exception as e:
+        logger.error(f"Error getting usage stats: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info") 
+    uvicorn.run(app, host="0.0.0.0", port=8000) 

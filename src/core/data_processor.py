@@ -5,6 +5,9 @@ from sklearn.model_selection import train_test_split
 from sklearn.feature_extraction.text import TfidfVectorizer
 from torch.utils.data import Dataset, DataLoader
 import torch
+import logging
+
+logger = logging.getLogger(__name__)
 
 class SMSDataset(Dataset):
     def __init__(self, texts, labels, vectorizer, max_length=128):
@@ -30,40 +33,60 @@ class SMSDataset(Dataset):
         }
 
 class DataProcessor:
-    def __init__(self, batch_size=16):
-        self.batch_size = batch_size
-        self.vectorizer = TfidfVectorizer(max_features=768)
-
-    def preprocess_text(self, text):
-        # Convert to lowercase
-        text = text.lower()
-        # Remove URLs
-        text = re.sub(r'http\S+|www\S+|https\S+', '', text, flags=re.MULTILINE)
-        # Remove special characters and numbers
-        text = re.sub(r'[^\w\s]', '', text)
-        # Remove extra whitespace
-        text = ' '.join(text.split())
-        return text
-
-    def load_data(self, file_path):
-        # Read the dataset
-        df = pd.read_csv(file_path, sep='\t', names=['label', 'message'])
-        # Map labels
-        df['label'] = df['label'].map({'ham': 0, 'spam': 1})
-        # Preprocess messages
-        df['message'] = df['message'].apply(self.preprocess_text)
-        return df
-
-    def prepare_data(self, df, test_size=0.2, val_size=0.1):
-        # First split into train and test
-        train_df, test_df = train_test_split(df, test_size=test_size, random_state=42)
-        # Then split train into train and validation
-        train_df, val_df = train_test_split(train_df, test_size=val_size, random_state=42)
+    def __init__(self):
+        self.vectorizer = TfidfVectorizer(
+            max_features=5000,
+            stop_words='english',
+            ngram_range=(1, 2)
+        )
         
-        # Fit vectorizer on training data
-        self.vectorizer.fit(train_df['message'])
-        
-        return train_df, val_df, test_df
+    def preprocess_text(self, text: str) -> str:
+        """
+        Preprocess the input text by removing special characters,
+        converting to lowercase, and removing extra whitespace.
+        """
+        try:
+            # Convert to lowercase
+            text = text.lower()
+            
+            # Remove special characters and numbers
+            text = re.sub(r'[^a-zA-Z\s]', '', text)
+            
+            # Remove extra whitespace
+            text = ' '.join(text.split())
+            
+            return text
+        except Exception as e:
+            logger.error(f"Error preprocessing text: {str(e)}")
+            raise
+            
+    def load_data(self, file_path: str) -> pd.DataFrame:
+        """
+        Load data from a file and return as a DataFrame.
+        """
+        try:
+            df = pd.read_csv(file_path, sep='\t', names=['label', 'text'])
+            return df
+        except Exception as e:
+            logger.error(f"Error loading data: {str(e)}")
+            raise
+            
+    def prepare_data(self, df: pd.DataFrame) -> tuple:
+        """
+        Prepare data for training by preprocessing text and fitting the vectorizer.
+        """
+        try:
+            # Preprocess all texts
+            df['processed_text'] = df['text'].apply(self.preprocess_text)
+            
+            # Fit and transform the vectorizer
+            X = self.vectorizer.fit_transform(df['processed_text'])
+            y = (df['label'] == 'spam').astype(int)
+            
+            return X, y
+        except Exception as e:
+            logger.error(f"Error preparing data: {str(e)}")
+            raise
 
     def create_dataloaders(self, train_df, val_df, test_df):
         # Create datasets
