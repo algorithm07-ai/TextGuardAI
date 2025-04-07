@@ -5,6 +5,7 @@ import aiohttp
 import asyncio
 from typing import Dict, List, Optional, Any
 from datetime import datetime
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 # Configure logging
 logging.basicConfig(
@@ -12,6 +13,10 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+class DeepSeekMCPError(Exception):
+    """Base exception for DeepSeek MCP client errors."""
+    pass
 
 class DeepSeekMCPClient:
     """
@@ -32,6 +37,8 @@ class DeepSeekMCPClient:
         self.session = None
         self.cache = {}
         self.cache_ttl = 3600  # 1 hour
+        self.max_retries = 3
+        self.retry_delay = 1  # seconds
         
     async def __aenter__(self):
         """Create aiohttp session when entering context."""
@@ -57,9 +64,10 @@ class DeepSeekMCPClient:
         self.tier = tier
         logger.info(f"API tier set to: {tier}")
         
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
     async def process_text(self, text: str, options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
-        Process text using the DeepSeek API.
+        Process text using the DeepSeek API with retry mechanism.
         
         Args:
             text: The text to process
@@ -67,6 +75,9 @@ class DeepSeekMCPClient:
             
         Returns:
             Dict containing the processing results
+            
+        Raises:
+            DeepSeekMCPError: If the API request fails after retries
         """
         if not self.session:
             self.session = aiohttp.ClientSession(
@@ -92,30 +103,44 @@ class DeepSeekMCPClient:
         if options:
             payload.update(options)
             
-        # Make request
-        try:
-            async with self.session.post(url, json=payload) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    logger.error(f"API error: {error_text}")
-                    raise Exception(f"API error: {response.status} - {error_text}")
+        # Make request with retry
+        for attempt in range(self.max_retries):
+            try:
+                async with self.session.post(url, json=payload) as response:
+                    if response.status == 429:  # Rate limit
+                        retry_after = int(response.headers.get('Retry-After', self.retry_delay))
+                        logger.warning(f"Rate limited. Waiting {retry_after} seconds.")
+                        await asyncio.sleep(retry_after)
+                        continue
+                        
+                    if response.status != 200:
+                        error_text = await response.text()
+                        logger.error(f"API error: {error_text}")
+                        raise DeepSeekMCPError(f"API error: {response.status} - {error_text}")
+                        
+                    result = await response.json()
                     
-                result = await response.json()
+                    # Cache result
+                    self.cache[cache_key] = {
+                        "result": result,
+                        "timestamp": datetime.now()
+                    }
+                    
+                    return result
+                    
+            except aiohttp.ClientError as e:
+                logger.error(f"Network error: {str(e)}")
+                if attempt == self.max_retries - 1:
+                    raise DeepSeekMCPError(f"Network error after {self.max_retries} attempts: {str(e)}")
+                await asyncio.sleep(self.retry_delay * (attempt + 1))
                 
-                # Cache result
-                self.cache[cache_key] = {
-                    "result": result,
-                    "timestamp": datetime.now()
-                }
+            except Exception as e:
+                logger.error(f"Error processing text: {str(e)}")
+                raise DeepSeekMCPError(f"Error processing text: {str(e)}")
                 
-                return result
-        except Exception as e:
-            logger.error(f"Error processing text: {str(e)}")
-            raise
-            
     async def batch_process(self, texts: List[str], options: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """
-        Process multiple texts in parallel.
+        Process multiple texts in parallel with error handling.
         
         Args:
             texts: List of texts to process
@@ -125,7 +150,26 @@ class DeepSeekMCPClient:
             List of processing results
         """
         tasks = [self.process_text(text, options) for text in texts]
-        return await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Process results and handle errors
+        processed_results = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(f"Error processing text {i}: {str(result)}")
+                processed_results.append({
+                    "error": str(result),
+                    "text": texts[i],
+                    "status": "error"
+                })
+            else:
+                processed_results.append({
+                    "result": result,
+                    "text": texts[i],
+                    "status": "success"
+                })
+                
+        return processed_results
         
     def get_usage_stats(self) -> Dict[str, Any]:
         """
@@ -137,5 +181,7 @@ class DeepSeekMCPClient:
         return {
             "tier": self.tier,
             "cache_size": len(self.cache),
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
+            "cache_hits": sum(1 for entry in self.cache.values() 
+                            if (datetime.now() - entry["timestamp"]).total_seconds() < self.cache_ttl)
         } 
